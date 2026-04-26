@@ -92,7 +92,7 @@ BELL_RING_TIMEOUT = 0.5    # s pause between ring bursts
 #   call_failed.wav  number_busy.wav  number_not_found.wav  not_allowed.wav
 #
 # Any missing files fall back to espeak automatically.
-USE_CUSTOM_AUDIO = False
+USE_CUSTOM_AUDIO = True
 CUSTOM_AUDIO_DIR = Path(__file__).parent / "audio"
 
 # baresip control socket
