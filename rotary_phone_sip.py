@@ -154,9 +154,85 @@ class TonePlayer:
                          ends with a SIP error reason
     """
 
+    # Words to pre-generate
+    _DIGIT_WORDS = {
+        "0": "zero", "1": "one",   "2": "two",   "3": "three",
+        "4": "four",  "5": "five",  "6": "six",   "7": "seven",
+        "8": "eight", "9": "nine",
+    }
+    _PHRASE_WORDS = {
+        "call_failed":       "call failed",
+        "number_busy":       "number busy",
+        "number_not_found":  "number not found",
+        "not_allowed":       "call not allowed",
+    }
+    _CACHE_DIR = Path("/tmp/rotary-pi-audio")
+
     def __init__(self):
-        self._dial_proc: subprocess.Popen | None = None
-        self._speak_lock = threading.Lock()   # one utterance at a time
+        self._dial_proc:  subprocess.Popen | None = None
+        self._play_lock   = threading.Lock()   # one aplay at a time
+        self._wav_cache:  dict[str, Path] = {}
+        self._prewarm()
+
+    # ── Pre-generate wav files at startup ─────────────────────────────────────
+
+    def _prewarm(self):
+        """
+        Generate all digit + phrase wavs once at startup so playback is instant.
+        Uses espeak to write wav files to /tmp, then sox to resample to 16 kHz
+        mono (aplay on Pi works best with a consistent format).
+        """
+        if not _ESPEAK_AVAILABLE:
+            print("[TONE] espeak not found — digit speech disabled  (sudo apt install espeak-ng)")
+            return
+
+        self._CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        all_words = {**self._DIGIT_WORDS, **self._PHRASE_WORDS}
+
+        for key, text in all_words.items():
+            wav = self._CACHE_DIR / f"{key}.wav"
+            if wav.exists():
+                self._wav_cache[key] = wav
+                continue
+            try:
+                # Generate wav via espeak
+                raw = self._CACHE_DIR / f"{key}_raw.wav"
+                subprocess.run(
+                    [_ESPEAK_BIN, "-s", "130", "-p", "40", "-w", str(raw), text],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+                )
+                if _SOX_AVAILABLE:
+                    # Resample to 16kHz mono for clean aplay output
+                    subprocess.run(
+                        ["sox", str(raw), "-r", "16000", "-c", "1", str(wav)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+                    )
+                    raw.unlink(missing_ok=True)
+                else:
+                    raw.rename(wav)
+                self._wav_cache[key] = wav
+            except Exception as e:
+                print(f"[TONE] Failed to pre-generate '{key}': {e}")
+
+        print(f"[TONE] Pre-generated {len(self._wav_cache)} audio clips.")
+
+    # ── Play a cached wav ──────────────────────────────────────────────────────
+
+    def _play_wav(self, key: str):
+        """Play a pre-cached wav file via aplay (non-blocking, runs in thread)."""
+        wav = self._wav_cache.get(key)
+        if not wav:
+            return
+        def _run():
+            with self._play_lock:
+                try:
+                    subprocess.run(
+                        ["aplay", "-q", str(wav)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                except Exception as e:
+                    print(f"[TONE] aplay failed: {e}")
+        threading.Thread(target=_run, daemon=True).start()
 
     # ── Dial tone ──────────────────────────────────────────────────────────────
 
@@ -182,44 +258,22 @@ class TonePlayer:
 
     # ── Digit announcement ─────────────────────────────────────────────────────
 
-    # espeak word for each digit
-    _DIGIT_WORDS = {
-        "0": "zero", "1": "one",   "2": "two",   "3": "three",
-        "4": "four",  "5": "five",  "6": "six",   "7": "seven",
-        "8": "eight", "9": "nine",
-    }
-
     def announce_digit(self, digit: str):
-        """
-        Speak the digit name in a background thread so it never blocks the caller.
-        Falls back to a pitched beep if espeak is unavailable.
-        """
-        word = self._DIGIT_WORDS.get(digit)
-        if word is None:
-            return
-
-        if _ESPEAK_AVAILABLE:
-            threading.Thread(
-                target=self._speak_sync, args=(word,), daemon=True
-            ).start()
+        """Play the pre-cached wav for this digit — near-instant, no chop."""
+        if digit in self._wav_cache:
+            self._play_wav(digit)
         elif _SOX_AVAILABLE:
-            # Fallback: DTMF-style pitched beep
+            # Fallback beep if wav generation failed
             _DTMF = {
                 "1": 697, "2": 770, "3": 852, "4": 941,
                 "5": 1040,"6": 1209,"7": 1336,"8": 1477,
                 "9": 1633,"0": 941,
             }
             freq = _DTMF.get(digit, 800)
-            threading.Thread(
-                target=self._beep_sync, args=(freq,), daemon=True
-            ).start()
-
-    def _speak_sync(self, text: str):
-        with self._speak_lock:
-            _espeak(text)
+            threading.Thread(target=self._beep_sync, args=(freq,), daemon=True).start()
 
     def _beep_sync(self, freq: int):
-        with self._speak_lock:
+        with self._play_lock:
             proc = _sox_play_async(
                 ["-n", "synth", "0.08", "sine", str(freq),
                  "fade", "t", "0", "0.08", "0.02"]
@@ -230,18 +284,14 @@ class TonePlayer:
     # ── Call-failed feedback ───────────────────────────────────────────────────
 
     def announce_call_failed(self, reason: str = ""):
-        """
-        Play two descending error tones then speak "call failed".
-        Runs in background — non-blocking.
-        """
+        """Play error tones then the appropriate failure phrase."""
         threading.Thread(
             target=self._fail_sequence, args=(reason,), daemon=True
         ).start()
 
     def _fail_sequence(self, reason: str):
-        with self._speak_lock:
+        with self._play_lock:
             if _SOX_AVAILABLE:
-                # Two descending tones: 480 Hz → 350 Hz (US reorder cadence, recognisable)
                 for freq in (480, 350):
                     proc = _sox_play_async(
                         ["-n", "synth", "0.3", "sine", str(freq),
@@ -250,16 +300,25 @@ class TonePlayer:
                     if proc:
                         proc.wait()
                     time.sleep(0.05)
-            # Speak the failure message
-            msg = "call failed"
+
             if "busy" in reason.lower() or "486" in reason:
-                msg = "number busy"
+                key = "number_busy"
             elif "404" in reason or "not found" in reason.lower():
-                msg = "number not found"
+                key = "number_not_found"
             elif "403" in reason:
-                msg = "call not allowed"
-            _espeak(msg, rate=120)
-            print(f"[TONE] Failure announced: '{msg}'  (reason={reason or '–'})")
+                key = "not_allowed"
+            else:
+                key = "call_failed"
+
+            wav = self._wav_cache.get(key)
+            if wav:
+                subprocess.run(
+                    ["aplay", "-q", str(wav)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            elif _ESPEAK_AVAILABLE:
+                _espeak(self._PHRASE_WORDS.get(key, "call failed"), rate=120)
+            print(f"[TONE] Failure announced: '{key}'  (reason={reason or '–'})")
 
 
 # Module-level singleton used by Bridge
