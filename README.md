@@ -104,6 +104,43 @@ Pulse-to-digit mapping follows standard GPO convention: 1 pulse = 1, …, 9 puls
 
 ---
 
+## Custom audio clips
+
+By default the phone uses espeak-generated speech for digit readback and error messages. You can swap in your own recordings by flipping one flag near the top of `rotary_phone_sip.py`:
+
+```python
+USE_CUSTOM_AUDIO = True
+CUSTOM_AUDIO_DIR = Path(__file__).parent / "audio"  # folder next to the script
+```
+
+Create an `audio/` folder in the repo and add wav files named:
+
+```
+audio/
+├── 0.wav
+├── 1.wav
+├── 2.wav
+├── 3.wav
+├── 4.wav
+├── 5.wav
+├── 6.wav
+├── 7.wav
+├── 8.wav
+├── 9.wav
+├── call_failed.wav
+├── number_busy.wav
+├── number_not_found.wav
+└── not_allowed.wav
+```
+
+Any missing files fall back to espeak automatically, so you can add them gradually. The startup log shows exactly what loaded from where:
+
+```
+[TONE] Audio ready — 10 custom, 4 espeak  (mode=custom)
+```
+
+---
+
 ## Auto-updates
 
 `setup.sh` installs a cron job that pulls from GitHub every 5 minutes. It only restarts the service if files actually changed, and skips restart if a call is in progress.
@@ -151,6 +188,7 @@ sudo systemctl enable --now rotary-phone
 Rotary-Pi/
 ├── rotary_phone_sip.py   # main script
 ├── setup.sh              # one-shot installer
+├── audio/                # optional custom wav clips (see Custom audio clips)
 ├── .env.example          # credentials template (copy to .env)
 ├── .gitignore
 └── README.md

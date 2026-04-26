@@ -83,6 +83,18 @@ BELL_HALF_PERIOD  = 0.025  # s per H-bridge half-cycle
 BELL_STROKES      = 20     # clapper strokes per ring burst
 BELL_RING_TIMEOUT = 0.5    # s pause between ring bursts
 
+# ── Audio clips ───────────────────────────────────────────────────────────────
+# Set USE_CUSTOM_AUDIO = True to use your own recordings instead of
+# espeak-generated speech.
+#
+# Drop wav files into CUSTOM_AUDIO_DIR named:
+#   0.wav  1.wav  2.wav ... 9.wav
+#   call_failed.wav  number_busy.wav  number_not_found.wav  not_allowed.wav
+#
+# Any missing files fall back to espeak automatically.
+USE_CUSTOM_AUDIO = False
+CUSTOM_AUDIO_DIR = Path(__file__).parent / "audio"
+
 # baresip control socket
 BARESIP_CTRL_HOST = "127.0.0.1"
 BARESIP_CTRL_PORT = 4444
@@ -178,43 +190,65 @@ class TonePlayer:
 
     def _prewarm(self):
         """
-        Generate all digit + phrase wavs once at startup so playback is instant.
-        Uses espeak to write wav files to /tmp, then sox to resample to 16 kHz
-        mono (aplay on Pi works best with a consistent format).
-        """
-        if not _ESPEAK_AVAILABLE:
-            print("[TONE] espeak not found — digit speech disabled  (sudo apt install espeak-ng)")
-            return
+        Build the wav cache at startup so all playback is instant.
 
+        If USE_CUSTOM_AUDIO is True, looks for wav files in CUSTOM_AUDIO_DIR
+        first.  Any missing custom files fall back to espeak generation.
+        If USE_CUSTOM_AUDIO is False, all clips are espeak-generated and
+        cached in /tmp.
+        """
         self._CACHE_DIR.mkdir(parents=True, exist_ok=True)
         all_words = {**self._DIGIT_WORDS, **self._PHRASE_WORDS}
+        custom_count  = 0
+        espeak_count  = 0
+        missing_count = 0
 
         for key, text in all_words.items():
-            wav = self._CACHE_DIR / f"{key}.wav"
-            if wav.exists():
-                self._wav_cache[key] = wav
+
+            # 1. Check for a custom recording
+            if USE_CUSTOM_AUDIO:
+                custom_wav = CUSTOM_AUDIO_DIR / f"{key}.wav"
+                if custom_wav.exists():
+                    self._wav_cache[key] = custom_wav
+                    custom_count += 1
+                    continue
+                else:
+                    print(f"[TONE] Custom audio missing: {custom_wav.name} — falling back to espeak")
+
+            # 2. Use espeak-generated clip (cached in /tmp)
+            if not _ESPEAK_AVAILABLE:
+                missing_count += 1
                 continue
+
+            cached_wav = self._CACHE_DIR / f"{key}.wav"
+            if cached_wav.exists():
+                self._wav_cache[key] = cached_wav
+                espeak_count += 1
+                continue
+
             try:
-                # Generate wav via espeak
                 raw = self._CACHE_DIR / f"{key}_raw.wav"
                 subprocess.run(
                     [_ESPEAK_BIN, "-s", "130", "-p", "40", "-w", str(raw), text],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
                 )
                 if _SOX_AVAILABLE:
-                    # Resample to 16kHz mono for clean aplay output
                     subprocess.run(
-                        ["sox", str(raw), "-r", "16000", "-c", "1", str(wav)],
+                        ["sox", str(raw), "-r", "16000", "-c", "1", str(cached_wav)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
                     )
                     raw.unlink(missing_ok=True)
                 else:
-                    raw.rename(wav)
-                self._wav_cache[key] = wav
+                    raw.rename(cached_wav)
+                self._wav_cache[key] = cached_wav
+                espeak_count += 1
             except Exception as e:
-                print(f"[TONE] Failed to pre-generate '{key}': {e}")
+                print(f"[TONE] Failed to generate '{key}': {e}")
+                missing_count += 1
 
-        print(f"[TONE] Pre-generated {len(self._wav_cache)} audio clips.")
+        mode = "custom" if USE_CUSTOM_AUDIO else "espeak"
+        print(f"[TONE] Audio ready — {custom_count} custom, {espeak_count} espeak"
+              + (f", {missing_count} missing" if missing_count else "") + f"  (mode={mode})")
 
     # ── Play a cached wav ──────────────────────────────────────────────────────
 
