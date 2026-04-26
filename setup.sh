@@ -72,9 +72,6 @@ else
     read -p "  SIP username / ext   [e.g. 1001]            : " sip_user
     read -s -p "  SIP password                                : " sip_password
     echo ""
-    read -p "  SIP port             [default: 5060]         : " sip_port
-    sip_port="${sip_port:-5060}"
-
     echo ""
     info "Available audio devices:"
     aplay -l 2>/dev/null | grep "^card" || echo "  (none found — check USB audio dongle)"
@@ -82,12 +79,9 @@ else
     read -p "  AUDIO_DEVICE  [e.g. alsa,plughw:1,0] : " audio_device
     audio_device="${audio_device:-default}"
 
-    # Write values (sed in-place)
-    sed -i "s|^SIP_SERVER=.*|SIP_SERVER=${sip_server}|"   "${ENV_FILE}"
-    sed -i "s|^SIP_USER=.*|SIP_USER=${sip_user}|"         "${ENV_FILE}"
-    sed -i "s|^SIP_PASSWORD=.*|SIP_PASSWORD=${sip_password}|" "${ENV_FILE}"
-    sed -i "s|^SIP_PORT=.*|SIP_PORT=${sip_port}|"         "${ENV_FILE}"
-    sed -i "s|^AUDIO_DEVICE=.*|AUDIO_DEVICE=${audio_device}|" "${ENV_FILE}"
+    # Write .env with quoted string values to match expected format
+    printf 'SIP_SERVER="%s"\nSIP_USER="%s"\nSIP_PASSWORD="%s"\nAUDIO_DEVICE=%s\n' \
+        "$sip_server" "$sip_user" "$sip_password" "$audio_device" > "${ENV_FILE}"
 
     chmod 600 "${ENV_FILE}"
     info ".env written."
