@@ -1,4 +1,4 @@
-# keira-pi
+# Rotary-Pi
 
 A Raspberry Pi Zero 2W project that converts a vintage GPO 746 rotary phone into a working SIP extension, registered on a self-hosted Asterisk PBX.
 
@@ -38,21 +38,25 @@ A Raspberry Pi Zero 2W project that converts a vintage GPO 746 rotary phone into
 
 ---
 
-## Dependencies
+## Quick start
 
 ```bash
-sudo apt install baresip sox espeak-ng
-pip3 install python-dotenv --break-system-packages
+git clone https://github.com/oakljen/Rotary-Pi.git ~/rotary-pi
+cd ~/rotary-pi
+bash setup.sh
 ```
+
+`setup.sh` installs all dependencies, sets up the systemd service, and configures the 5-minute auto-update cron job. You'll be prompted to enter your SIP credentials.
 
 ---
 
-## Setup
+## Manual setup
 
-**1. Clone**
+**1. Install dependencies**
 ```bash
-git clone https://github.com/YOUR_USERNAME/keira-pi.git ~/phone
-cd ~/phone
+sudo apt update
+sudo apt install -y baresip sox espeak-ng python3-pip git
+pip3 install python-dotenv --break-system-packages
 ```
 
 **2. Configure credentials**
@@ -61,7 +65,7 @@ cp .env.example .env
 nano .env
 ```
 
-Fill in your SIP server, extension, and password. For ALSA audio device discovery:
+Fill in your SIP server, extension, and password. To find your ALSA audio device:
 ```bash
 aplay -l
 ```
@@ -76,10 +80,9 @@ python3 rotary_phone_sip.py
 
 ## SIP / Asterisk
 
-The phone registers as a SIP extension on a self-hosted Asterisk PBX. Example `sip.conf` / `pjsip.conf` extension entry:
+The phone registers as a SIP extension on a self-hosted Asterisk PBX. Example `sip.conf` entry:
 
 ```ini
-; sip.conf (chan_sip)
 [1002]
 type=friend
 secret=yourpassword
@@ -101,9 +104,20 @@ Pulse-to-digit mapping follows standard GPO convention: 1 pulse = 1, …, 9 puls
 
 ---
 
+## Auto-updates
+
+`setup.sh` installs a cron job that pulls from GitHub every 5 minutes. It only restarts the service if files actually changed, and skips restart if a call is in progress.
+
+To check the update log:
+```bash
+tail -f ~/rotary-pi/update.log
+```
+
+---
+
 ## Running as a service
 
-To have the phone start automatically on boot:
+`setup.sh` handles this automatically. To do it manually:
 
 ```bash
 sudo nano /etc/systemd/system/rotary-phone.service
@@ -115,11 +129,11 @@ Description=Rotary Phone SIP Bridge
 After=network.target sound.target
 
 [Service]
-ExecStart=/usr/bin/python3 /home/keira-pi/phone/rotary_phone_sip.py
-WorkingDirectory=/home/keira-pi/phone
+ExecStart=/usr/bin/python3 /home/pi/rotary-pi/rotary_phone_sip.py
+WorkingDirectory=/home/pi/rotary-pi
 Restart=on-failure
 RestartSec=5
-User=keira-pi
+User=pi
 
 [Install]
 WantedBy=multi-user.target
@@ -134,8 +148,9 @@ sudo systemctl enable --now rotary-phone
 ## Project structure
 
 ```
-keira-pi/
+Rotary-Pi/
 ├── rotary_phone_sip.py   # main script
+├── setup.sh              # one-shot installer
 ├── .env.example          # credentials template (copy to .env)
 ├── .gitignore
 └── README.md
