@@ -896,6 +896,10 @@ class Bridge:
             with self._lock:
                 self.state = State.IN_CALL
             self.bell.silence()
+            # Wait for USB audio dongle to stabilise after bell coil stops
+            # The bell draws a large current spike that can briefly disconnect
+            # the USB bus — this delay lets it recover before baresip opens audio.
+            time.sleep(0.8)
             self.sip.answer()
         elif state == State.IDLE:
             with self._lock:
