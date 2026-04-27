@@ -896,10 +896,20 @@ class Bridge:
             with self._lock:
                 self.state = State.IN_CALL
             self.bell.silence()
-            # Wait for USB audio dongle to stabilise after bell coil stops
-            # The bell draws a large current spike that can briefly disconnect
-            # the USB bus — this delay lets it recover before baresip opens audio.
-            time.sleep(0.8)
+            self.bell.silence()
+            # Wait for USB audio to recover after bell coil spike
+            print("[HOOK] Waiting for USB audio to stabilise …")
+            deadline = time.time() + 3.0
+            import subprocess
+            while time.time() < deadline:
+                result = subprocess.run(
+                    ["aplay", "-l"], capture_output=True, text=True
+                )
+                if "USB Audio" in result.stdout:
+                    time.sleep(0.3)  # small extra buffer after detection
+                    break
+                time.sleep(0.1)
+            self.sip.answer()
             self.sip.answer()
         elif state == State.IDLE:
             with self._lock:
