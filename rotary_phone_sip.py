@@ -27,6 +27,8 @@ SIP credentials
     python3 rotary_phone_sip.py
 """
 
+from __future__ import annotations
+
 import json
 import os
 import queue
@@ -990,7 +992,7 @@ class Bridge:
             self.state      = State.CALLING_OUT
 
         uri = _number_to_uri(number)
-        print(f"[BRIDGE] Calling {number} → {uri}")
+        print(f"[BRIDGE] Calling {number} -> {uri}")
         self.sip.dial(uri)
 
 
