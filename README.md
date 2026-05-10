@@ -182,6 +182,95 @@ sudo systemctl enable --now rotary-phone
 
 ---
 
+## Testing and dial calibration
+
+`test_rotary.py` runs unit tests on any machine and includes a live GPIO calibration mode for the Pi.
+
+### Unit tests (any machine)
+
+```bash
+python3 test_rotary.py              # run all 26 unit tests
+python3 test_rotary.py --verbose    # show individual pass/fail
+python3 test_rotary.py --test dial  # just digit-accumulation tests
+```
+
+Available suites: `netstring`, `state`, `dial`, `sim`, `tone`, `all`
+
+---
+
+### GPIO dial calibration (Pi only)
+
+Use this to confirm your wiring and tune timing constants without needing a live SIP server.
+
+**Important: stop the service first or you will get a `GPIO busy` error.**
+
+```bash
+sudo systemctl stop rotary-phone
+```
+
+**Step 1 — confirm the wiring is alive (raw mode, shows every edge):**
+
+```bash
+python3 test_rotary.py --test gpio
+```
+
+Spin the dial. You should see lines like:
+
+```
+  FALLING v   gap=    0.0ms   pin=LOW
+  RISING ^    gap=  118.3ms   pin=HIGH
+  FALLING v   gap=  121.7ms   pin=LOW
+```
+
+If you see nothing at all, check:
+- Wire is connected between BCM 18 and GND
+- The script prints the pin state at startup — `HIGH` is correct at idle; `LOW` means the pin is already shorted
+
+**Step 2 — count real digits:**
+
+```bash
+# Try rising first (most rotary dials break the circuit per pulse)
+python3 test_rotary.py --test gpio --edge rising
+
+# If counts are wrong, try falling
+python3 test_rotary.py --test gpio --edge falling
+```
+
+Dial 6 — you should see exactly 6 pulses then:
+
+```
+  [OK] digit #1 => '6'  (6 pulses)
+```
+
+Press Ctrl+C for a full summary of every digit dialled and any mismatches.
+
+**Tuning timing:**
+
+| Problem | Fix |
+|---|---|
+| Getting 7 instead of 6 | `--pulse-debounce 0.05` |
+| Getting 5 instead of 6 | `--pulse-debounce 0.02` |
+| Digit commits too early | `--inter-digit-gap 1.5` |
+| Long wait after last pulse | `--inter-digit-gap 0.7` |
+
+```bash
+python3 test_rotary.py --test gpio --edge rising --pulse-debounce 0.04 --inter-digit-gap 1.2
+```
+
+Once values are correct, copy them into the constants at the top of `rotary_phone_sip.py`, then restart the service:
+
+```bash
+sudo systemctl start rotary-phone
+```
+
+**Override the pin (if your dial is wired differently):**
+
+```bash
+python3 test_rotary.py --test gpio --dial-pin 2
+```
+
+---
+
 ## Project structure
 
 ```

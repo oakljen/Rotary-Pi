@@ -460,9 +460,27 @@ def gpio_dial(args: argparse.Namespace):
     dial_pin = args.dial_pin
     edge_arg = args.edge.lower()      # "both", "rising", or "falling"
 
+    # Release any pins left over from a previous run before claiming them
+    try:
+        GPIO.cleanup()
+    except Exception:
+        pass
+
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
-    GPIO.setup(dial_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    try:
+        GPIO.setup(dial_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    except Exception as e:
+        print(f"ERROR: Could not claim BCM {dial_pin}: {e}")
+        print()
+        print("  The pin is owned by another process (probably the rotary-phone service).")
+        print("  Stop it first, then re-run:")
+        print()
+        print("    sudo systemctl stop rotary-phone")
+        print(f"    python3 test_rotary.py --test gpio")
+        print()
+        GPIO.cleanup()
+        return 1
 
     # Read pin state immediately — tells us if wiring is alive
     state_now = GPIO.input(dial_pin)
