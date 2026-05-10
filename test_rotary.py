@@ -29,9 +29,13 @@ from unittest.mock import patch, MagicMock
 # ── Make sure we can import the bridge module ──────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
 
-# Stub out RPi.GPIO before importing so tests run on any platform
-sys.modules.setdefault("RPi", MagicMock())
-sys.modules.setdefault("RPi.GPIO", MagicMock())
+# Only mock RPi.GPIO when the real library is not installed (e.g. Windows/Mac).
+# On the Pi the real library must stay in sys.modules so gpio_dial works.
+try:
+    import RPi.GPIO as _real_gpio  # noqa: F401
+except (ImportError, RuntimeError):
+    sys.modules["RPi"]     = MagicMock()
+    sys.modules["RPi.GPIO"] = MagicMock()
 
 import rotary_phone_sip as bridge_mod
 
