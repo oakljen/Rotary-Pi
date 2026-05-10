@@ -270,6 +270,156 @@ class TestTonePlayer(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# LIVE DIAL  — interactive dial simulator for tuning timing constants
+# ══════════════════════════════════════════════════════════════════════════════
+
+def live_dial(args: argparse.Namespace):
+    """
+    Interactive dial-pulse simulator.
+
+    Type a pulse count (1-10) and press Enter to simulate one rotary digit.
+    The digit is committed after INTER_DIGIT_GAP seconds, then a call is
+    placed after DIGIT_TIMEOUT more seconds — just like the real hardware.
+
+    Commands
+    --------
+      1-10       simulate N pulses (10 = digit 0)
+      0          same as 10 pulses  -> digit 0
+      r  reset   clear digit buffer without dialling
+      t  timing  print current timing values
+      q  quit    exit
+      ?  help    show this list
+    """
+    # Apply timing overrides from args
+    if args.inter_digit_gap is not None:
+        bridge_mod.INTER_DIGIT_GAP = args.inter_digit_gap
+    if args.digit_timeout is not None:
+        bridge_mod.DIGIT_TIMEOUT = args.digit_timeout
+    if args.pulse_debounce is not None:
+        bridge_mod.PULSE_DEBOUNCE = args.pulse_debounce
+
+    # Silence audio so the loop is fast and clean
+    bridge_mod.tone_player.start_dial_tone    = lambda: None
+    bridge_mod.tone_player.stop_dial_tone     = lambda: None
+    bridge_mod.tone_player.announce_digit     = lambda d: None
+    bridge_mod.tone_player.announce_call_failed = lambda r="": None
+
+    # Build a minimal Bridge with a spy SIP engine
+    b = bridge_mod.Bridge.__new__(bridge_mod.Bridge)
+    b.state            = bridge_mod.State.COLLECTING
+    b.bell             = MagicMock()
+    b._digit_buf       = []
+    b._pulse_count     = 0
+    b._last_pulse_time = 0.0
+    b._dialling        = False
+    b._digit_timer     = None
+    b._lock            = threading.Lock()
+
+    dialled_numbers: list[str] = []
+
+    class SpySIP:
+        def dial(self, uri):
+            dialled_numbers.append(uri)
+            print(f"\n  >>> WOULD DIAL: {uri}")
+            print(f"  >>> buffer after dial: {b._digit_buf}")
+            # Reset so user can dial again immediately
+            with b._lock:
+                b.state      = bridge_mod.State.COLLECTING
+                b._digit_buf = []
+        def hangup(self): pass
+        def answer(self): pass
+
+    b.sip = SpySIP()
+
+    def _print_timing():
+        print(f"  INTER_DIGIT_GAP : {bridge_mod.INTER_DIGIT_GAP:.3f} s  "
+              f"(silence after last pulse -> commit digit)")
+        print(f"  DIGIT_TIMEOUT   : {bridge_mod.DIGIT_TIMEOUT:.3f} s  "
+              f"(silence after last digit -> dial)")
+        print(f"  PULSE_DEBOUNCE  : {bridge_mod.PULSE_DEBOUNCE:.3f} s  "
+              f"(min pulse width)")
+
+    def _print_help():
+        print("  1-10 / 0  simulate N pulses   r  reset buffer")
+        print("  t         show timing          q  quit")
+
+    print()
+    print("=" * 52)
+    print("  LIVE DIAL SIMULATOR  (Ctrl+C or q to quit)")
+    print("=" * 52)
+    _print_timing()
+    print()
+    _print_help()
+    print()
+
+    try:
+        while True:
+            buf_display = "".join(b._digit_buf) or "(empty)"
+            raw = input(f"  buffer={buf_display}  pulses> ").strip().lower()
+
+            if not raw:
+                continue
+
+            if raw in ("q", "quit", "exit"):
+                break
+
+            if raw in ("?", "help"):
+                _print_help()
+                continue
+
+            if raw in ("t", "timing"):
+                _print_timing()
+                continue
+
+            if raw in ("r", "reset"):
+                if b._digit_timer:
+                    b._digit_timer.cancel()
+                with b._lock:
+                    b._digit_buf   = []
+                    b._pulse_count = 0
+                    b._dialling    = False
+                    b.state        = bridge_mod.State.COLLECTING
+                print("  buffer cleared.")
+                continue
+
+            # Parse pulse count
+            try:
+                n = int(raw)
+            except ValueError:
+                print(f"  Unknown command '{raw}'. Type ? for help.")
+                continue
+
+            if n == 0:
+                n = 10  # 0 on rotary = 10 pulses
+            if not (1 <= n <= 10):
+                print("  Enter 1-10 (or 0 for digit 0).")
+                continue
+
+            # Simulate N pulses with realistic inter-pulse gap
+            gap = max(bridge_mod.PULSE_DEBOUNCE + 0.01, 0.08)
+            print(f"  Sending {n} pulse(s) ... ", end="", flush=True)
+            for i in range(n):
+                b.on_dial_pulse()
+                if i < n - 1:
+                    time.sleep(gap)
+            digit = "0" if n == 10 else str(n)
+            print(f"digit will be '{digit}' in {bridge_mod.INTER_DIGIT_GAP:.2f}s, "
+                  f"dial in {bridge_mod.INTER_DIGIT_GAP + bridge_mod.DIGIT_TIMEOUT:.2f}s")
+
+    except (KeyboardInterrupt, EOFError):
+        pass
+
+    if b._digit_timer:
+        b._digit_timer.cancel()
+
+    print()
+    print(f"  Session summary: {len(dialled_numbers)} call(s) placed")
+    for u in dialled_numbers:
+        print(f"    {u}")
+    print()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CLI / argument parsing
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -281,19 +431,21 @@ SUITES = {
     "tone":      unittest.TestLoader().loadTestsFromTestCase(TestTonePlayer),
 }
 
+_ALL_TESTS = [*SUITES, "all", "live"]
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Rotary Phone SIP Bridge — component test runner",
+        description="Rotary Phone SIP Bridge -- component test runner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     p.add_argument(
         "--test",
-        choices=[*SUITES, "all"],
+        choices=_ALL_TESTS,
         default="all",
-        metavar="{" + "|".join([*SUITES, "all"]) + "}",
-        help="Which test suite to run (default: all)",
+        metavar="{" + "|".join(_ALL_TESTS) + "}",
+        help="Which test suite to run, or 'live' for the interactive dial simulator (default: all)",
     )
     p.add_argument(
         "--verbose", "-v",
@@ -325,6 +477,31 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECS",
         help="Max seconds to let the SimEngine scenario run (default: let it finish)",
     )
+    # Timing knobs (live mode + unit tests)
+    p.add_argument(
+        "--inter-digit-gap",
+        type=float,
+        default=None,
+        metavar="SECS",
+        help=f"Override INTER_DIGIT_GAP (default {bridge_mod.INTER_DIGIT_GAP}s): "
+             "silence after last pulse before committing a digit",
+    )
+    p.add_argument(
+        "--digit-timeout",
+        type=float,
+        default=None,
+        metavar="SECS",
+        help=f"Override DIGIT_TIMEOUT (default {bridge_mod.DIGIT_TIMEOUT}s): "
+             "silence after last digit before dialling",
+    )
+    p.add_argument(
+        "--pulse-debounce",
+        type=float,
+        default=None,
+        metavar="SECS",
+        help=f"Override PULSE_DEBOUNCE (default {bridge_mod.PULSE_DEBOUNCE}s): "
+             "minimum pulse width to count",
+    )
     return p
 
 
@@ -338,10 +515,20 @@ def apply_overrides(args: argparse.Namespace):
     if args.password:
         bridge_mod.SIP_PASSWORD = args.password
         os.environ["SIP_PASSWORD"] = args.password
+    if args.inter_digit_gap is not None:
+        bridge_mod.INTER_DIGIT_GAP = args.inter_digit_gap
+    if args.digit_timeout is not None:
+        bridge_mod.DIGIT_TIMEOUT = args.digit_timeout
+    if args.pulse_debounce is not None:
+        bridge_mod.PULSE_DEBOUNCE = args.pulse_debounce
 
 
 def run(args: argparse.Namespace) -> int:
     apply_overrides(args)
+
+    if args.test == "live":
+        live_dial(args)
+        return 0
 
     verbosity = 2 if args.verbose else 1
 
