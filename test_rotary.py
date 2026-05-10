@@ -420,6 +420,145 @@ def live_dial(args: argparse.Namespace):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# GPIO DIAL CALIBRATION  — runs on the real Pi with the physical rotary dial
+# ══════════════════════════════════════════════════════════════════════════════
+
+def gpio_dial(args: argparse.Namespace):
+    """
+    Real-hardware dial calibration.  Run this ON THE PI.
+
+    Listens to DIAL_PIN via RPi.GPIO, prints every pulse as it arrives,
+    then prints the committed digit once the inter-digit gap expires.
+
+    Dial any digit as many times as you like.  Press Ctrl+C to exit and
+    see a summary of every digit read vs. how many pulses were counted.
+
+    Tuning tips
+    -----------
+    Too many pulses per digit  -> decrease PULSE_DEBOUNCE (more sensitive)
+    Too few pulses per digit   -> increase PULSE_DEBOUNCE (less sensitive)
+    Digit commits too early    -> increase INTER_DIGIT_GAP
+    Digit commits too late     -> decrease INTER_DIGIT_GAP
+    """
+    try:
+        import RPi.GPIO as GPIO
+    except (ImportError, RuntimeError):
+        print("ERROR: RPi.GPIO not available — connect to the Pi and run this there.")
+        return 1
+
+    # Apply timing overrides
+    if args.inter_digit_gap is not None:
+        bridge_mod.INTER_DIGIT_GAP = args.inter_digit_gap
+    if args.digit_timeout is not None:
+        bridge_mod.DIGIT_TIMEOUT = args.digit_timeout
+    if args.pulse_debounce is not None:
+        bridge_mod.PULSE_DEBOUNCE = args.pulse_debounce
+
+    dial_pin = args.dial_pin
+
+    print()
+    print("=" * 52)
+    print("  GPIO DIAL CALIBRATION")
+    print("=" * 52)
+    print(f"  DIAL_PIN        : BCM {dial_pin}")
+    print(f"  INTER_DIGIT_GAP : {bridge_mod.INTER_DIGIT_GAP:.3f} s")
+    print(f"  DIGIT_TIMEOUT   : {bridge_mod.DIGIT_TIMEOUT:.3f} s")
+    print(f"  PULSE_DEBOUNCE  : {bridge_mod.PULSE_DEBOUNCE:.3f} s")
+    print()
+    print("  Spin the dial.  Ctrl+C to quit and show summary.")
+    print()
+
+    lock         = threading.Lock()
+    pulse_count  = 0
+    last_pulse_t = 0.0
+    commit_timer: list[threading.Timer] = [None]  # mutable container
+    session_log: list[tuple[int, str]]  = []      # (pulses, digit)
+    digit_index  = [0]
+
+    def _commit():
+        nonlocal pulse_count, last_pulse_t
+        with lock:
+            n           = pulse_count
+            pulse_count = 0
+            last_pulse_t = 0.0
+        digit = "0" if n == 10 else str(n)
+        idx   = digit_index[0]
+        digit_index[0] += 1
+        session_log.append((n, digit))
+        expected = digit  # what the user dialled (we trust this read)
+        ok = "OK" if n in range(1, 11) else "??"
+        print(f"\n  [{ok}] digit #{idx+1} => '{digit}'  ({n} pulses)\n")
+
+    def _pulse_cb(channel):
+        nonlocal pulse_count, last_pulse_t
+        now = time.time()
+        with lock:
+            gap = now - last_pulse_t
+            if last_pulse_t and gap < bridge_mod.PULSE_DEBOUNCE:
+                # Too fast — noise, ignore
+                print(f"  [skip] pulse ignored (gap={gap*1000:.1f}ms < "
+                      f"debounce={bridge_mod.PULSE_DEBOUNCE*1000:.0f}ms)")
+                return
+            last_pulse_t  = now
+            pulse_count  += 1
+            n             = pulse_count
+        print(f"  pulse #{n:2d}  (+{gap*1000:6.1f} ms)", flush=True)
+
+        # Reset the commit timer
+        if commit_timer[0]:
+            commit_timer[0].cancel()
+        t = threading.Timer(bridge_mod.INTER_DIGIT_GAP, _commit)
+        t.daemon = True
+        t.start()
+        commit_timer[0] = t
+
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+    GPIO.setup(dial_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.add_event_detect(dial_pin, GPIO.FALLING, callback=_pulse_cb, bouncetime=20)
+
+    print(f"  Listening on BCM {dial_pin} ...")
+    print()
+
+    try:
+        while True:
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if commit_timer[0]:
+            commit_timer[0].cancel()
+        GPIO.cleanup()
+
+    print()
+    print("=" * 52)
+    print("  CALIBRATION SUMMARY")
+    print("=" * 52)
+    if not session_log:
+        print("  No digits recorded.")
+    else:
+        errors = 0
+        for i, (pulses, digit) in enumerate(session_log):
+            expected_pulses = 10 if digit == "0" else int(digit)
+            flag = ""
+            if pulses != expected_pulses:
+                flag = f"  <-- MISMATCH (expected {expected_pulses})"
+                errors += 1
+            print(f"  dial #{i+1:2d}: {pulses:2d} pulses -> '{digit}'{flag}")
+        print()
+        print(f"  {len(session_log)} digit(s) read, {errors} mismatch(es)")
+        if errors:
+            print()
+            print("  To fix mismatches:")
+            print("    Too many pulses -> --pulse-debounce 0.05  (raise debounce)")
+            print("    Too few pulses  -> --pulse-debounce 0.02  (lower debounce)")
+            print("    Commits early   -> --inter-digit-gap 1.5")
+            print("    Commits late    -> --inter-digit-gap 0.7")
+    print()
+    return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CLI / argument parsing
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -431,7 +570,7 @@ SUITES = {
     "tone":      unittest.TestLoader().loadTestsFromTestCase(TestTonePlayer),
 }
 
-_ALL_TESTS = [*SUITES, "all", "live"]
+_ALL_TESTS = [*SUITES, "all", "live", "gpio"]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -445,7 +584,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=_ALL_TESTS,
         default="all",
         metavar="{" + "|".join(_ALL_TESTS) + "}",
-        help="Which test suite to run, or 'live' for the interactive dial simulator (default: all)",
+        help="'gpio' = real dial calibration on Pi; 'live' = keyboard simulator; 'all' = unit tests (default: all)",
+    )
+    p.add_argument(
+        "--dial-pin",
+        type=int,
+        default=bridge_mod.DIAL_PIN,
+        metavar="BCM",
+        help=f"GPIO BCM pin for the dial pulse wire (default: {bridge_mod.DIAL_PIN})",
     )
     p.add_argument(
         "--verbose", "-v",
@@ -529,6 +675,9 @@ def run(args: argparse.Namespace) -> int:
     if args.test == "live":
         live_dial(args)
         return 0
+
+    if args.test == "gpio":
+        return gpio_dial(args)
 
     verbosity = 2 if args.verbose else 1
 
