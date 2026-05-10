@@ -427,23 +427,22 @@ def gpio_dial(args: argparse.Namespace):
     """
     Real-hardware dial calibration.  Run this ON THE PI.
 
-    Listens to DIAL_PIN via RPi.GPIO, prints every pulse as it arrives,
-    then prints the committed digit once the inter-digit gap expires.
+    Step 1 — run with no extra flags.  The script prints the current pin
+    state (HIGH/LOW) and then shows EVERY edge (rising and falling) so
+    you can confirm the wiring is alive before worrying about counts.
 
-    Dial any digit as many times as you like.  Press Ctrl+C to exit and
-    see a summary of every digit read vs. how many pulses were counted.
+    Step 2 — once you see activity, use --edge falling or --edge rising
+    to lock in the correct edge and start counting real digits.
 
     Tuning tips
     -----------
-    Too many pulses per digit  -> decrease PULSE_DEBOUNCE (more sensitive)
-    Too few pulses per digit   -> increase PULSE_DEBOUNCE (less sensitive)
-    Digit commits too early    -> increase INTER_DIGIT_GAP
-    Digit commits too late     -> decrease INTER_DIGIT_GAP
+    Too many pulses  -> raise --inter-digit-gap  or  lower --pulse-debounce
+    Too few pulses   -> lower  --inter-digit-gap  or  raise --pulse-debounce
     """
     try:
         import RPi.GPIO as GPIO
     except (ImportError, RuntimeError):
-        print("ERROR: RPi.GPIO not available — connect to the Pi and run this there.")
+        print("ERROR: RPi.GPIO not available — run this on the Pi.")
         return 1
 
     # Apply timing overrides
@@ -455,56 +454,67 @@ def gpio_dial(args: argparse.Namespace):
         bridge_mod.PULSE_DEBOUNCE = args.pulse_debounce
 
     dial_pin = args.dial_pin
+    edge_arg = args.edge.lower()      # "both", "rising", or "falling"
+
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+    GPIO.setup(dial_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+    # Read pin state immediately — tells us if wiring is alive
+    state_now = GPIO.input(dial_pin)
+    state_str = "HIGH (3.3 V — idle/open)" if state_now else "LOW  (GND  — shorted/closed)"
 
     print()
-    print("=" * 52)
+    print("=" * 56)
     print("  GPIO DIAL CALIBRATION")
-    print("=" * 52)
-    print(f"  DIAL_PIN        : BCM {dial_pin}")
+    print("=" * 56)
+    print(f"  DIAL_PIN   : BCM {dial_pin}   current state: {state_str}")
+    print(f"  edge mode  : {edge_arg}  (change with --edge falling|rising|both)")
     print(f"  INTER_DIGIT_GAP : {bridge_mod.INTER_DIGIT_GAP:.3f} s")
-    print(f"  DIGIT_TIMEOUT   : {bridge_mod.DIGIT_TIMEOUT:.3f} s")
     print(f"  PULSE_DEBOUNCE  : {bridge_mod.PULSE_DEBOUNCE:.3f} s")
     print()
-    print("  Spin the dial.  Ctrl+C to quit and show summary.")
+
+    if edge_arg == "both":
+        print("  RAW MODE — showing every edge (rising + falling).")
+        print("  Spin the dial and look for activity.")
+        print("  When you see pulses, re-run with --edge falling or --edge rising.")
+    else:
+        print(f"  COUNTING MODE — counting {edge_arg} edges as pulses.")
+        print("  Spin the dial.  Ctrl+C to quit and see summary.")
     print()
 
     lock         = threading.Lock()
-    pulse_count  = 0
-    last_pulse_t = 0.0
-    commit_timer: list[threading.Timer] = [None]  # mutable container
-    session_log: list[tuple[int, str]]  = []      # (pulses, digit)
-    digit_index  = [0]
+    pulse_count  = [0]
+    last_t       = [0.0]
+    commit_timer: list[threading.Timer] = [None]
+    session_log:  list[tuple[int, str]] = []
+    digit_index   = [0]
 
     def _commit():
-        nonlocal pulse_count, last_pulse_t
         with lock:
-            n           = pulse_count
-            pulse_count = 0
-            last_pulse_t = 0.0
+            n            = pulse_count[0]
+            pulse_count[0] = 0
+            last_t[0]    = 0.0
         digit = "0" if n == 10 else str(n)
+        ok    = "OK" if 1 <= n <= 10 else "ERR"
         idx   = digit_index[0]
         digit_index[0] += 1
         session_log.append((n, digit))
-        expected = digit  # what the user dialled (we trust this read)
-        ok = "OK" if n in range(1, 11) else "??"
-        print(f"\n  [{ok}] digit #{idx+1} => '{digit}'  ({n} pulses)\n")
+        print(f"\n  [{ok}] digit #{idx+1} => '{digit}'  ({n} pulses)\n", flush=True)
 
-    def _pulse_cb(channel):
-        nonlocal pulse_count, last_pulse_t
+    def _count_cb(channel):
         now = time.time()
         with lock:
-            gap = now - last_pulse_t
-            if last_pulse_t and gap < bridge_mod.PULSE_DEBOUNCE:
-                # Too fast — noise, ignore
-                print(f"  [skip] pulse ignored (gap={gap*1000:.1f}ms < "
-                      f"debounce={bridge_mod.PULSE_DEBOUNCE*1000:.0f}ms)")
+            gap = now - last_t[0]
+            # Skip if within debounce window (but always count the very first pulse)
+            if last_t[0] and gap < bridge_mod.PULSE_DEBOUNCE:
+                print(f"  [debounce skip] gap={gap*1000:.1f}ms", flush=True)
                 return
-            last_pulse_t  = now
-            pulse_count  += 1
-            n             = pulse_count
-        print(f"  pulse #{n:2d}  (+{gap*1000:6.1f} ms)", flush=True)
+            last_t[0]      = now
+            pulse_count[0] += 1
+            n               = pulse_count[0]
+        print(f"  pulse #{n:2d}   gap={gap*1000:6.1f}ms", flush=True)
 
-        # Reset the commit timer
         if commit_timer[0]:
             commit_timer[0].cancel()
         t = threading.Timer(bridge_mod.INTER_DIGIT_GAP, _commit)
@@ -512,12 +522,23 @@ def gpio_dial(args: argparse.Namespace):
         t.start()
         commit_timer[0] = t
 
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setwarnings(False)
-    GPIO.setup(dial_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.add_event_detect(dial_pin, GPIO.FALLING, callback=_pulse_cb, bouncetime=20)
+    def _raw_cb(channel):
+        now      = time.time()
+        state    = GPIO.input(dial_pin)
+        edge_str = "RISING ^" if state else "FALLING v"
+        gap      = now - last_t[0]
+        last_t[0] = now
+        print(f"  {edge_str}   gap={gap*1000:7.1f}ms   pin={'HIGH' if state else 'LOW '}", flush=True)
 
-    print(f"  Listening on BCM {dial_pin} ...")
+    # Register the appropriate callback
+    if edge_arg == "both":
+        GPIO.add_event_detect(dial_pin, GPIO.BOTH, callback=_raw_cb, bouncetime=5)
+    elif edge_arg == "rising":
+        GPIO.add_event_detect(dial_pin, GPIO.RISING,  callback=_count_cb, bouncetime=5)
+    else:
+        GPIO.add_event_detect(dial_pin, GPIO.FALLING, callback=_count_cb, bouncetime=5)
+
+    print(f"  Listening on BCM {dial_pin} ...  (Ctrl+C to stop)")
     print()
 
     try:
@@ -592,6 +613,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=bridge_mod.DIAL_PIN,
         metavar="BCM",
         help=f"GPIO BCM pin for the dial pulse wire (default: {bridge_mod.DIAL_PIN})",
+    )
+    p.add_argument(
+        "--edge",
+        choices=["both", "falling", "rising"],
+        default="both",
+        help="Edge to count as a pulse. Start with 'both' to see raw activity, "
+             "then switch to 'falling' or 'rising' once confirmed (default: both)",
     )
     p.add_argument(
         "--verbose", "-v",
